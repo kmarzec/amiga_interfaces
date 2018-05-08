@@ -21,7 +21,8 @@
 #include <linux/types.h>
 #include <linux/spi/spidev.h>
 #include <string.h>
-
+#include <signal.h> 
+#include <sys/time.h>
 
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
@@ -34,45 +35,18 @@ static void pabort(const char *s)
 
 
 
-void spi_transfer(int fd, const void* send_buffer, void* receive_buffer, size_t size)
+int spi_read_write(int fd, const void* buf_tx, void* buf_rx, size_t count)
 {
-	
-	uint8_t tx[] = {
-		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-		0x40, 0x00, 0x00, 0x00, 0x00, 0x95,
-		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-		0xDE, 0xAD, 0xBE, 0xEF, 0xBA, 0xAD,
-		0xF0, 0x0D,
+	struct spi_ioc_transfer tr = {
+		.tx_buf = (unsigned long)buf_tx,
+		.rx_buf = (unsigned long)buf_rx,
+		.len = count,
+		.delay_usecs = 0,
+		.speed_hz = 0,
+		.bits_per_word = 0,  
 	};
-	
-	uint8_t rx[ARRAY_SIZE(tx)] = {0, };
-	
-	
-	struct spi_ioc_transfer tr;
-	memset(&tr, sizeof(tr), 0);
-	tr.tx_buf = (unsigned long)send_buffer;
-	tr.rx_buf = (unsigned long)receive_buffer;
-	tr.len = (unsigned int)size;
 
-	//printf("tr.tx_buf: 0x%p\n", send_buffer);
-	//printf("tr.rx_buf: 0x%p\n", receive_buffer);
-	//printf("tr.tx_buf: %llu\n", tr.tx_buf);
-	//printf("tr.rx_buf: %llu\n", tr.rx_buf);
-	//printf("tr.len: %d\n", tr.len);
-
-	int ret = ioctl(fd, SPI_IOC_MESSAGE(1), &tr);
-	if (ret == 1)
-	{
-		pabort("can't send spi message");
-	}
-
-	for(size_t i=0; i<size; ++i)
-	{
-		printf("%.2X ", ((const uint8_t*)receive_buffer)[i]);	
-	}
-	printf("\n");
+	return ioctl(fd, SPI_IOC_MESSAGE(1), &tr);
 }
 
 
@@ -131,8 +105,26 @@ int open_spi_device()
 }
 
 
+
+volatile sig_atomic_t stop = 0;
+void signal_int(int sig)
+{ // can be called asynchronously
+	stop = 1; // set flag
+}
+
+
+float get_time()
+{
+	struct timeval tv;
+	gettimeofday (&tv, NULL);
+	return (float)(tv.tv_sec) + 0.000001 * tv.tv_usec;
+}
+
+
 int main(int argc, char *argv[])
 {
+	signal(SIGINT, signal_int); 
+	
 	int ret = 0;
 	int fd = open_spi_device();
 
@@ -140,10 +132,25 @@ int main(int argc, char *argv[])
 	uint8_t tx[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 	uint8_t rx[ARRAY_SIZE(tx)] = {0, };
 
-	for(;;)
+	float start_time = get_time();
+	size_t bytes_transferred = 0;
+
+	while(!stop)
 	{
-		spi_transfer(fd, tx, rx, ARRAY_SIZE(tx));
+		spi_read_write(fd, tx, rx, ARRAY_SIZE(tx));
+		bytes_transferred += ARRAY_SIZE(tx);
+		
+		for(size_t i=0; i<ARRAY_SIZE(tx); ++i)
+		{
+			printf("%.2X ", rx[i]);
+		}
+		printf("\n");
 	}
+
+	float end_time = get_time();
+	float time = (end_time - start_time);
+	printf("time: %.2fs\n", time);
+	printf("transferrer: %.2f KB\n", bytes_transferred / 1024.0f);
 
 	close(fd);
 
