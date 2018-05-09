@@ -113,11 +113,18 @@ void signal_int(int sig)
 }
 
 
-float get_time()
+int64_t get_timestamp()
 {
-	struct timeval tv;
-	gettimeofday (&tv, NULL);
-	return (float)(tv.tv_sec) + 0.000001 * tv.tv_usec;
+	int64_t result = 0;
+
+	struct timeval sTime;
+	gettimeofday(&sTime, NULL);
+
+	result = sTime.tv_sec;
+	result *= 1000000;
+	result += sTime.tv_usec;
+
+	return result;
 }
 
 
@@ -129,11 +136,12 @@ int main(int argc, char *argv[])
 	int fd = open_spi_device();
 
 
-	uint8_t tx[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+	uint8_t tx[512];
 	uint8_t rx[ARRAY_SIZE(tx)] = {0, };
 
-	float start_time = get_time();
+	int64_t start_time = get_timestamp();
 	size_t bytes_transferred = 0;
+	size_t bytes_printed = 0;
 
 	while(!stop)
 	{
@@ -143,14 +151,24 @@ int main(int argc, char *argv[])
 		for(size_t i=0; i<ARRAY_SIZE(tx); ++i)
 		{
 			printf("%.2X ", rx[i]);
+			if(++bytes_printed % 16 == 0)
+			{
+				printf("\n");
+			}
 		}
-		printf("\n");
 	}
 
-	float end_time = get_time();
-	float time = (end_time - start_time);
-	printf("time: %.2fs\n", time);
+	int64_t end_time = get_timestamp();
+	float total_time = (end_time - start_time) * 0.000001f;
+	printf("time: %.2fs\n", total_time);
 	printf("transferrer: %.2f KB\n", bytes_transferred / 1024.0f);
+
+	float bytesps = bytes_transferred / total_time;
+	float bitssps = bytesps * 8;
+
+	printf("speed KB/s: %.2f\n", bytesps / 1024.0f);
+	printf("speed kbps: %.2f\n", bytesps / 125.0f);
+
 
 	close(fd);
 
