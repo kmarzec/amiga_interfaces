@@ -1,4 +1,4 @@
-obj-m := driver_test-params.o driver_test.o
+obj-m := brd.o brd.o
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 
