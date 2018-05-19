@@ -28,9 +28,17 @@
 
 #include <linux/uaccess.h>
 
+//#define KERNEL_4_13 1
+#define KERNEL_4_14_34 1
+
 #define SECTOR_SHIFT		9
 #define PAGE_SECTORS_SHIFT	(PAGE_SHIFT - SECTOR_SHIFT)
 #define PAGE_SECTORS		(1 << PAGE_SECTORS_SHIFT)
+
+#define AHI_BLOCKDEVICE_NAME "ahi_fd"
+#define AHI_DISK_NAME_FORMAT "ahi_fd%d"
+#define AHI_DISK_COUNT 1
+#define AHI_DISK_SECTOR_COUNT 10
 
 /*
  * Each block ramdisk device has a radix_tree brd_pages of pages that stores
@@ -65,10 +73,6 @@ static struct page *brd_lookup_page(struct brd_device *brd, sector_t sector)
 {
 	pgoff_t idx;
 	struct page *page;
-
-
-
-
 
 	/*
 	 * The page lifetime is protected by the fact that we have opened the
@@ -255,7 +259,7 @@ static void copy_from_brd(void *dst, struct brd_device *brd,
 		src = kmap_atomic(page);
 		memcpy(dst, src + offset, copy);
 		kunmap_atomic(src);
-	} 
+	}
 
 	if (copy < n) {
 		dst += copy;
@@ -266,8 +270,8 @@ static void copy_from_brd(void *dst, struct brd_device *brd,
 		if (page) {
 			src = kmap_atomic(page);
 			memcpy(dst, src, copy);
-			kunmap_atomic(src);
-		} 
+				kunmap_atomic(src);
+		}
 	}
 }
 
@@ -303,14 +307,18 @@ out:
 
 static blk_qc_t brd_make_request(struct request_queue *q, struct bio *bio)
 {
+#if KERNEL_4_14_34
+	struct brd_device *brd = bio->bi_disk->private_data;
+#else /*4_13*/
 	struct block_device *bdev = bio->bi_bdev;
 	struct brd_device *brd = bdev->bd_disk->private_data;
+#endif
 	struct bio_vec bvec;
 	sector_t sector;
 	struct bvec_iter iter;
 
 	sector = bio->bi_iter.bi_sector;
-	if (bio_end_sector(bio) > get_capacity(bdev->bd_disk))
+	if (bio_end_sector(bio) > get_capacity(bio->bi_disk))
 		goto io_error;
 
 	bio_for_each_segment(bvec, bio, iter) {
@@ -335,7 +343,15 @@ static int brd_rw_page(struct block_device *bdev, sector_t sector,
 		       struct page *page, bool is_write)
 {
 	struct brd_device *brd = bdev->bd_disk->private_data;
+#if KERNEL_4_14_34
+	int err;
+
+	if (PageTransHuge(page))
+		return -ENOTSUPP;
+	err = brd_do_bvec(brd, page, PAGE_SIZE, 0, is_write, sector);
+#else /*4_13*/
 	int err = brd_do_bvec(brd, page, PAGE_SIZE, 0, is_write, sector);
+#endif
 	page_endio(page, is_write, err);
 	return err;
 }
@@ -348,7 +364,11 @@ static long __brd_direct_access(struct brd_device *brd, pgoff_t pgoff,
 
 	if (!brd)
 		return -ENODEV;
+#if KERNEL_4_14_34
+	page = brd_insert_page(brd, (sector_t)pgoff << PAGE_SECTORS_SHIFT);
+#else /*4_13*/
 	page = brd_insert_page(brd, PFN_PHYS(pgoff) / 512);
+#endif
 	if (!page)
 		return -ENOSPC;
 	*kaddr = page_address(page);
@@ -385,31 +405,23 @@ static const struct block_device_operations brd_fops = {
 /*
  * And now the modules code and kernel interface.
  */
-static int rd_nr = 1; //CONFIG_BLK_DEV_RAM_COUNT;
+static int rd_nr = AHI_DISK_COUNT;
 module_param(rd_nr, int, S_IRUGO);
 MODULE_PARM_DESC(rd_nr, "Maximum number of brd devices");
 
-unsigned long sector_count = 10; //80*11*2; //CONFIG_BLK_DEV_RAM_SIZE;
-//module_param(rd_size, ulong, S_IRUGO);
-//MODULE_PARM_DESC(rd_size, "Size of each RAM disk in kbytes.");
+unsigned long sector_count = AHI_DISK_SECTOR_COUNT;
+module_param(sector_count, ulong, S_IRUGO);
+MODULE_PARM_DESC(rd_size, "Size of each RAM disk in kbytes.");
 
 static int max_part = 1;
 module_param(max_part, int, S_IRUGO);
 MODULE_PARM_DESC(max_part, "Num Minors to reserve between devices");
 
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_BLOCKDEV_MAJOR(RAMDISK_MAJOR);
-MODULE_ALIAS("rd");
+//MODULE_ALIAS_BLOCKDEV_MAJOR(RAMDISK_MAJOR);
+//MODULE_ALIAS("rd");
 
-//#ifndef MODULE
-///* Legacy boot options - nonmodular */
-//static int __init ramdisk_size(char *str)
-//{
-//	rd_size = simple_strtol(str, NULL, 0);
-//	return 1;
-//}
-//__setup("ramdisk_size=", ramdisk_size);
-//#endif
+static int ahi_blockdevice_number = 0;
 
 /*
  * The device scheme is derived from loop.c. Keep them in synch where possible
@@ -447,13 +459,13 @@ static struct brd_device *brd_alloc(int i)
 	disk = brd->brd_disk = alloc_disk(max_part);
 	if (!disk)
 		goto out_free_queue;
-	disk->major		= RAMDISK_MAJOR;
+	disk->major		= ahi_blockdevice_number; //RAMDISK_MAJOR;
 	disk->first_minor	= i * max_part;
 	disk->fops		= &brd_fops;
 	disk->private_data	= brd;
 	disk->queue		= brd->brd_queue;
 	disk->flags		= GENHD_FL_EXT_DEVT;
-	sprintf(disk->disk_name, "ahi_fd%d", i);
+	sprintf(disk->disk_name, AHI_DISK_NAME_FORMAT, i);
 	set_capacity(disk, sector_count);
 
 #ifdef CONFIG_BLK_DEV_RAM_DAX
@@ -554,8 +566,8 @@ static int __init brd_init(void)
 	 *	If (X / max_part) was not already created it will be created
 	 *	dynamically.
 	 */
-
-	if (register_blkdev(RAMDISK_MAJOR, "ahi"))
+	ahi_blockdevice_number = register_blkdev(0, AHI_BLOCKDEVICE_NAME);
+	if (ahi_blockdevice_number < 0)
 		return -EIO;
 
 	if (unlikely(!max_part))
@@ -573,7 +585,7 @@ static int __init brd_init(void)
 	list_for_each_entry(brd, &brd_devices, brd_list)
 		add_disk(brd->brd_disk);
 
-	blk_register_region(MKDEV(RAMDISK_MAJOR, 0), 1UL << MINORBITS,
+	blk_register_region(MKDEV(ahi_blockdevice_number, 0), 1UL << MINORBITS,
 				  THIS_MODULE, brd_probe, NULL, NULL);
 
 	pr_info("brd: module loaded\n");
@@ -584,7 +596,7 @@ out_free:
 		list_del(&brd->brd_list);
 		brd_free(brd);
 	}
-	unregister_blkdev(RAMDISK_MAJOR, "ramdisk");
+	unregister_blkdev(ahi_blockdevice_number, AHI_BLOCKDEVICE_NAME);
 
 	pr_info("brd: module NOT loaded !!!\n");
 	return -ENOMEM;
@@ -597,8 +609,8 @@ static void __exit brd_exit(void)
 	list_for_each_entry_safe(brd, next, &brd_devices, brd_list)
 		brd_del_one(brd);
 
-	blk_unregister_region(MKDEV(RAMDISK_MAJOR, 0), 1UL << MINORBITS);
-	unregister_blkdev(RAMDISK_MAJOR, "ahi");
+	blk_unregister_region(MKDEV(ahi_blockdevice_number, 0), 1UL << MINORBITS);
+	unregister_blkdev(ahi_blockdevice_number, AHI_BLOCKDEVICE_NAME);
 
 	pr_info("brd: module unloaded\n");
 }
