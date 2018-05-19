@@ -101,6 +101,7 @@ static struct page *brd_insert_page(struct brd_device *brd, sector_t sector)
 	pgoff_t idx;
 	struct page *page;
 	gfp_t gfp_flags;
+	void* dst = 0;
 
 	page = brd_lookup_page(brd, sector);
 	if (page)
@@ -140,6 +141,10 @@ static struct page *brd_insert_page(struct brd_device *brd, sector_t sector)
 	spin_unlock(&brd->brd_lock);
 
 	radix_tree_preload_end();
+
+	dst = kmap_atomic(page);
+	memset(dst, 0xAB, 512);
+	kunmap_atomic(dst);
 
 	return page;
 }
@@ -244,25 +249,25 @@ static void copy_from_brd(void *dst, struct brd_device *brd,
 	size_t copy;
 
 	copy = min_t(size_t, n, PAGE_SIZE - offset);
-	page = brd_lookup_page(brd, sector);
+	page = brd_insert_page(brd, sector);
+	BUG_ON(!page);
 	if (page) {
 		src = kmap_atomic(page);
 		memcpy(dst, src + offset, copy);
 		kunmap_atomic(src);
-	} else
-		memset(dst, 0, copy);
+	} 
 
 	if (copy < n) {
 		dst += copy;
 		sector += copy >> SECTOR_SHIFT;
 		copy = n - copy;
-		page = brd_lookup_page(brd, sector);
+		page = brd_insert_page(brd, sector);
+		BUG_ON(!page);
 		if (page) {
 			src = kmap_atomic(page);
 			memcpy(dst, src, copy);
 			kunmap_atomic(src);
-		} else
-			memset(dst, 0, copy);
+		} 
 	}
 }
 
