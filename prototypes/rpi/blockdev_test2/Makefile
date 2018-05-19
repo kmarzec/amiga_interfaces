@@ -1,4 +1,4 @@
-obj-m := brd.o brd.o
+obj-m := ahi.o ahi.o
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 
