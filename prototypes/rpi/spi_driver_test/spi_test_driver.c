@@ -11,17 +11,27 @@ static bool dma = false; /* use DMA? */
 
 /* DMA buffer */
 void *spi_tx_buf;
+void *spi_rx_buf;
 dma_addr_t spi_tx_dma;
+dma_addr_t spi_rx_dma;
 
 
-static int spi_write_sync(struct spi_device *spi, const void *buf, size_t len)
+static int spi_write_sync(struct spi_device *spi, const void *tx_buf, void *rx_buf, size_t len)
 {
 	struct spi_transfer     t = {
-					.tx_buf         = buf,
+					.tx_buf         = tx_buf,
 					.len            = len,
+					.rx_buf = rx_buf
 			};
 	struct spi_message      m;
 	int ret;
+
+	size_t bytes_printed;
+	size_t i;
+	char* rx;
+	char line[256];
+	char* line_buf;
+
 
 	printk("\n=> %s(len=%d), dma=%s\n", __func__, len, dma ? "true" : "false");
 
@@ -29,12 +39,32 @@ static int spi_write_sync(struct spi_device *spi, const void *buf, size_t len)
 
 	if (dma) {
 		t.tx_dma = spi_tx_dma;
+		t.rx_dma = spi_rx_dma;
 		m.is_dma_mapped = 1;
 	}
 
 	spi_message_add_tail(&t, &m);
 	ret = spi_sync(spi, &m);
 	printk("<= %s() returned: %d\n", __func__, ret);
+
+	
+	bytes_printed = 0;
+	rx = (char*)rx_buf;
+	line_buf = line;
+	for(i=0; i<len; ++i)
+	{
+		line_buf += sprintf(line_buf, "%.2X ", (int)rx[i]);
+		if(++bytes_printed % 16 == 0)
+		{
+			printk("%s\n", line);
+			line_buf = line;
+		}
+	}
+	if(line_buf != line)
+	{
+		printk("%s\n", line);
+	}
+
 	return ret;
 }
 
@@ -48,12 +78,16 @@ static int spi_dma_probe(struct spi_device *spi)
 	if (!spi_tx_buf) {
 		return -ENOMEM;
 	}
+	spi_rx_buf = dma_alloc_coherent(&spi->dev, 2*PAGE_SIZE, &spi_rx_dma, GFP_DMA);
+	if (!spi_rx_buf) {
+		return -ENOMEM;
+	}
 
-	dma = false;
-	spi_write_sync(spi, spi_tx_buf, 1024);
+	//dma = false;
+	//spi_write_sync(spi, spi_tx_buf, spi_rx_buf, 256);
 
 	dma = true;
-	spi_write_sync(spi, spi_tx_buf, 1024);
+	spi_write_sync(spi, spi_tx_buf, spi_rx_buf, 256);
 
 	return 0;
 }
@@ -64,6 +98,8 @@ static int spi_dma_remove(struct spi_device *spi)
 
 	if (spi_tx_buf)
 		dma_free_coherent(&spi->dev, PAGE_SIZE, spi_tx_buf, spi_tx_dma);
+	if (spi_rx_buf)
+		dma_free_coherent(&spi->dev, PAGE_SIZE, spi_rx_buf, spi_rx_dma);
 
 	return 0;
 }
